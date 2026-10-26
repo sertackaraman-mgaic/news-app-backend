@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "news-app-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "account_id": "ef068c77b17af655ace4b64ee2c0549d",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["0 11 * * *", "0 12 * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "news-db",
+      "database_id": "05731179-782f-4c9c-94a2-2d0403a53426",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
