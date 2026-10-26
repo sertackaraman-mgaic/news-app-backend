@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>News Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --border: #e3e6eb; --text: #14171c; --muted: #5d6573;
+    --accent: #2754c5; --accent-hover: #1e44a3;
+    --high-bg: #e3f5ea; --high-fg: #11703a;
+    --mid-bg: #fdf3dc; --mid-fg: #8a5a00;
+    --low-bg: #f0f1f4; --low-fg: #555d6b;
+    --error-bg: #fdecec; --error-fg: #a32020;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --surface: #171b21; --border: #2a3039; --text: #e8eaee; --muted: #9aa3b2;
+      --accent: #6d93f2; --accent-hover: #8aa9f5;
+      --high-bg: #123222; --high-fg: #6fd59a;
+      --mid-bg: #3a2e10; --mid-fg: #f2c25c;
+      --low-bg: #242a33; --low-fg: #a7afbd;
+      --error-bg: #3b1717; --error-fg: #f19a9a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 Inter, system-ui, -apple-system, sans-serif; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 0; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  .subtitle { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .refresh-area { display: flex; align-items: center; gap: 12px; }
+  #lastRefreshed { color: var(--muted); font-size: 13px; text-align: right; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 9px 16px; background: var(--accent); color: #fff; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+  button:hover:not(:disabled) { background: var(--accent-hover); }
+  button:disabled { opacity: .7; cursor: progress; }
+  .spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; display: none; }
+  button.loading .spinner { display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .filters { display: flex; gap: 16px; padding: 14px 0 18px; flex-wrap: wrap; align-items: flex-end; }
+  .filters label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  select { font: inherit; font-size: 14px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; min-width: 150px; }
+  #count { margin-left: auto; color: var(--muted); font-size: 13px; padding-bottom: 8px; }
+  .banner { margin: 20px 0 0; padding: 12px 16px; border-radius: 8px; font-size: 14px; display: none; }
+  .banner.show { display: block; }
+  .banner.info { background: var(--surface); border: 1px solid var(--border); }
+  .banner.error { background: var(--error-bg); color: var(--error-fg); }
+  main { padding: 8px 0 48px; }
+  section h2 { font-size: 17px; margin: 28px 0 12px; display: flex; align-items: baseline; gap: 10px; }
+  section h2 span { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .meta { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+  .meta .source { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { margin-left: auto; flex-shrink: 0; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+  .badge.high { background: var(--high-bg); color: var(--high-fg); }
+  .badge.mid { background: var(--mid-bg); color: var(--mid-fg); }
+  .badge.low { background: var(--low-bg); color: var(--low-fg); }
+  .card h3 { margin: 0; font-size: 15.5px; line-height: 1.35; }
+  .card h3 a { color: var(--text); text-decoration: none; }
+  .card h3 a:hover { color: var(--accent); text-decoration: underline; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  @media (max-width: 600px) { #count { margin-left: 0; width: 100%; } .refresh-area { width: 100%; justify-content: space-between; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>News Intelligence</h1>
+        <p class="subtitle">AI &amp; capital markets · VC into AI in finance · AI in high-speed trading</p>
+      </div>
+      <div class="refresh-area">
+        <div id="lastRefreshed">Loading…</div>
+        <button id="refreshBtn" type="button"><span class="spinner"></span><span class="label">Refresh</span></button>
+      </div>
+    </div>
+    <div class="filters">
+      <label>Topic
+        <select id="topic"><option value="">All topics</option></select>
+      </label>
+      <label>Minimum relevance
+        <select id="minScore">
+          <option value="1">Any (1+)</option><option value="5">5+</option><option value="7">7+</option><option value="8">8+</option><option value="9">9+</option>
+        </select>
+      </label>
+      <label>Show
+        <select id="limit">
+          <option value="10">10 articles</option><option value="25">25 articles</option><option value="50" selected>50 articles</option><option value="100">100 articles</option>
+        </select>
+      </label>
+      <div id="count"></div>
+    </div>
+  </div>
+</header>
+<div class="wrap">
+  <div id="banner" class="banner"></div>
+  <main id="content"></main>
+</div>
+
+<script>
+  const API = "https://news-app-backend.sertac-karaman-ef0.workers.dev";
+  const TOPICS = ["AI & capital markets", "Venture capital into AI in finance", "AI in high-speed trading"];
+
+  const $ = (id) => document.getElementById(id);
+  const topicSel = $("topic"), minScoreSel = $("minScore"), limitSel = $("limit");
+  const content = $("content"), banner = $("banner"), countEl = $("count"), refreshBtn = $("refreshBtn");
+
+  for (const t of TOPICS) topicSel.add(new Option(t, t));
+
+  function esc(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+  function safeUrl(u) {
+    return /^https?:\/\//i.test(u || "") ? u : "#";
+  }
+  function fmtDate(d) {
+    if (!d) return "Date unknown";
+    const date = new Date(d.length === 10 ? d + "T12:00:00" : d);
+    return isNaN(date) ? d : date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  }
+  function fmtDateTime(d) {
+    // D1 stores UTC as "YYYY-MM-DD HH:MM:SS"
+    const date = new Date(d.includes("T") ? d : d.replace(" ", "T") + "Z");
+    return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  }
+  function scoreClass(s) { return s >= 8 ? "high" : s >= 5 ? "mid" : "low"; }
+
+  function showBanner(text, kind) {
+    banner.className = "banner show " + kind;
+    banner.textContent = text;
+  }
+  function hideBanner() { banner.className = "banner"; }
+
+  function render(articles) {
+    countEl.textContent = `${articles.length} article${articles.length === 1 ? "" : "s"}`;
+    if (!articles.length) {
+      content.innerHTML = `<div class="empty">No articles match these filters.</div>`;
+      return;
+    }
+    const groups = new Map();
+    for (const t of TOPICS) groups.set(t, []);
+    for (const a of articles) {
+      if (!groups.has(a.topic)) groups.set(a.topic, []);
+      groups.get(a.topic).push(a);
+    }
+    let html = "";
+    for (const [topic, items] of groups) {
+      if (!items.length) continue;
+      html += `<section><h2>${esc(topic)} <span>${items.length}</span></h2><div class="grid">`;
+      for (const a of items) {
+        html += `<article class="card">
+          <div class="meta"><span class="source">${esc(a.source || "Unknown source")}</span><span>·</span><span>${esc(fmtDate(a.published_at))}</span>
+            <span class="badge ${scoreClass(a.relevance_score)}" title="Relevance score">${esc(a.relevance_score)}/10</span></div>
+          <h3><a href="${esc(safeUrl(a.url))}" target="_blank" rel="noopener noreferrer">${esc(a.headline)}</a></h3>
+          <p>${esc(a.ai_summary || "")}</p>
+        </article>`;
+      }
+      html += `</div></section>`;
+    }
+    content.innerHTML = html;
+  }
+
+  let loadSeq = 0;
+  async function loadArticles() {
+    const seq = ++loadSeq;
+    const params = new URLSearchParams({ min_score: minScoreSel.value, limit: limitSel.value });
+    if (topicSel.value) params.set("topic", topicSel.value);
+    try {
+      const res = await fetch(`${API}/articles?${params}`);
+      if (!res.ok) throw new Error(`API returned ${res.status}`);
+      const data = await res.json();
+      if (seq !== loadSeq) return; // a newer filter change has already taken over
+      render(data.articles);
+      const latest = data.articles.map((a) => a.fetched_at).filter(Boolean).sort().pop();
+      $("lastRefreshed").innerHTML = latest
+        ? `Data last refreshed<br><strong>${esc(fmtDateTime(latest))}</strong>`
+        : "No data yet";
+    } catch (err) {
+      showBanner(`Couldn't load articles: ${err.message}`, "error");
+    }
+  }
+
+  async function refresh() {
+    refreshBtn.disabled = true;
+    refreshBtn.classList.add("loading");
+    refreshBtn.querySelector(".label").textContent = "Running agent…";
+    showBanner("Searching the web for new articles. This usually takes about a minute.", "info");
+    try {
+      const res = await fetch(`${API}/agent`, { method: "POST" });
+      if (!res.ok) throw new Error(`Agent returned ${res.status}`);
+      const r = await res.json();
+      await loadArticles();
+      showBanner(`Refresh complete: ${r.inserted} new article${r.inserted === 1 ? "" : "s"} added, ${r.skipped} already stored (${r.total_returned} found).`, "info");
+    } catch (err) {
+      showBanner(`Refresh failed: ${err.message}`, "error");
+    } finally {
+      refreshBtn.disabled = false;
+      refreshBtn.classList.remove("loading");
+      refreshBtn.querySelector(".label").textContent = "Refresh";
+    }
+  }
+
+  topicSel.addEventListener("change", loadArticles);
+  minScoreSel.addEventListener("change", loadArticles);
+  limitSel.addEventListener("change", loadArticles);
+  refreshBtn.addEventListener("click", refresh);
+  loadArticles();
+</script>
+</body>
+</html>

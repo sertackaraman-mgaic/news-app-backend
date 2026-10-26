@@ -19,4 +19,6 @@ npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler deploy
 ```
 
+The dashboard lives in `frontend/` (static page served by the `news-app-frontend` Worker). Deploy it with `cd frontend && npx wrangler deploy`.
+
 Secrets live in `.env` locally (gitignored) and as Worker secrets in Cloudflare; none are committed.

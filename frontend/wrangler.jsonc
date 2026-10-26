@@ -1,0 +1,7 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "news-app-frontend",
+  "compatibility_date": "2026-10-01",
+  "account_id": "ef068c77b17af655ace4b64ee2c0549d",
+  "assets": { "directory": "./public" }
+}
