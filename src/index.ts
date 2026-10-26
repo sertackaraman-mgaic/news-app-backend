@@ -3,6 +3,17 @@ import Anthropic from "@anthropic-ai/sdk";
 export interface Env {
   DB: D1Database;
   ANTHROPIC_API_KEY: string;
+  // Bearer token external systems send to POST /trigger.
+  AGENT_TRIGGER_TOKEN?: string;
+  // Signing secret from a Slack app, enables POST /slack for a slash command.
+  SLACK_SIGNING_SECRET?: string;
+  // Background runs go through a queue: waitUntil work is cut off 30s after a response.
+  AGENT_QUEUE: Queue<AgentJob>;
+}
+
+interface AgentJob {
+  source: "trigger" | "slack";
+  responseUrl?: string;
 }
 
 const TOPICS = [
@@ -20,7 +31,7 @@ const SCHEDULE_HOUR = 7;
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Max-Age": "86400",
 };
 
@@ -266,7 +277,8 @@ async function listArticles(env: Env, params: URLSearchParams) {
 }
 
 // Streams progress as newline-delimited JSON, ending with {"type":"done","summary":...}.
-// The run lives in waitUntil so it still finishes and saves if the browser disconnects.
+// The run lives in waitUntil while the browser stays connected; if it disconnects, Cloudflare
+// allows about 30 more seconds, so topics that finish by then are still saved.
 function streamAgent(env: Env, ctx: ExecutionContext): Response {
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
@@ -294,6 +306,68 @@ function streamAgent(env: Env, ctx: ExecutionContext): Response {
   });
 }
 
+// ---------- authenticated external triggers ----------
+
+const encoder = new TextEncoder();
+
+// Compares two strings in constant time by hashing both to equal-length digests first.
+async function safeEqual(a: string, b: string): Promise<boolean> {
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(a)),
+    crypto.subtle.digest("SHA-256", encoder.encode(b)),
+  ]);
+  return crypto.subtle.timingSafeEqual(da, db);
+}
+
+function summaryText(s: Awaited<ReturnType<typeof runAgent>>): string {
+  const lines = s.topics.map((t) =>
+    t.error ? `• ${t.topic}: failed (${t.error})` : `• ${t.topic}: ${t.inserted} new, ${t.skipped} already stored`,
+  );
+  return `News agent finished: ${s.inserted} new articles, ${s.skipped} already stored (${s.total_returned} found).\n${lines.join("\n")}`;
+}
+
+// POST /trigger with "Authorization: Bearer <AGENT_TRIGGER_TOKEN>".
+// Returns 202 right away and runs in the background; add ?wait=1 to get the summary back instead.
+async function handleTrigger(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  if (request.method !== "POST") return json({ error: "Use POST" }, 405);
+  if (!env.AGENT_TRIGGER_TOKEN) return json({ error: "Trigger is not configured" }, 503);
+
+  const auth = request.headers.get("Authorization") ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (!token || !(await safeEqual(token, env.AGENT_TRIGGER_TOKEN))) {
+    return json({ error: "Unauthorized" }, 401);
+  }
+
+  if (new URL(request.url).searchParams.get("wait") === "1") {
+    const summary = await runAgent(env);
+    return json({ status: "completed", text: summaryText(summary), summary });
+  }
+  await env.AGENT_QUEUE.send({ source: "trigger" });
+  return json({ status: "started", message: "News agent is running; results will appear in the dashboard in about a minute." }, 202);
+}
+
+// POST /slack: Slack slash command. Verifies Slack's request signature, acknowledges
+// within Slack's 3-second limit, then posts the result to the command's response_url.
+async function handleSlack(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return json({ error: "Use POST" }, 405);
+  if (!env.SLACK_SIGNING_SECRET) return json({ error: "Slack is not configured" }, 503);
+
+  const timestamp = request.headers.get("X-Slack-Request-Timestamp") ?? "";
+  const signature = request.headers.get("X-Slack-Signature") ?? "";
+  const body = await request.text();
+  if (!timestamp || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) {
+    return json({ error: "Stale or missing timestamp" }, 401);
+  }
+  const key = await crypto.subtle.importKey("raw", encoder.encode(env.SLACK_SIGNING_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", key, encoder.encode(`v0:${timestamp}:${body}`));
+  const expected = "v0=" + [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (!(await safeEqual(signature, expected))) return json({ error: "Invalid signature" }, 401);
+
+  const responseUrl = new URLSearchParams(body).get("response_url") ?? undefined;
+  await env.AGENT_QUEUE.send({ source: "slack", responseUrl });
+  return Response.json({ response_type: "ephemeral", text: "Running the news agent… I'll post the results here in about a minute." });
+}
+
 // ---------- entry points ----------
 
 export default {
@@ -308,14 +382,38 @@ export default {
         case "/agent":
           if (url.searchParams.get("stream") === "1") return streamAgent(env, ctx);
           return json(await runAgent(env));
+        case "/trigger":
+          return await handleTrigger(request, env, ctx);
+        case "/slack":
+          return await handleSlack(request, env);
         case "/articles":
           return json(await listArticles(env, url.searchParams));
         default:
-          return json({ error: "Not found", endpoints: ["/health", "/agent", "/articles"] }, 404);
+          return json({ error: "Not found", endpoints: ["/health", "/agent", "/articles", "/trigger", "/slack"] }, 404);
       }
     } catch (err) {
       console.error(err);
       return json({ error: String(err) }, 500);
+    }
+  },
+
+  // Runs queued by /trigger and /slack. Queue consumers get up to 15 minutes, enough for a full run.
+  async queue(batch: MessageBatch<AgentJob>, env: Env): Promise<void> {
+    for (const msg of batch.messages) {
+      let text: string;
+      try {
+        text = summaryText(await runAgent(env));
+      } catch (err) {
+        text = `News agent failed: ${String(err)}`;
+      }
+      if (msg.body.responseUrl?.startsWith("https://hooks.slack.com/")) {
+        await fetch(msg.body.responseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ response_type: "in_channel", text }),
+        });
+      }
+      msg.ack();
     }
   },
 
@@ -328,6 +426,7 @@ export default {
       ),
     );
     if (localHour !== SCHEDULE_HOUR) return;
-    ctx.waitUntil(runAgent(env));
+    // Await directly: cron handlers get up to 15 minutes, but waitUntil work is cut off sooner.
+    await runAgent(env);
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<Env, AgentJob>;

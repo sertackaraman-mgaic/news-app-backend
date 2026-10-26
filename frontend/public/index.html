@@ -352,7 +352,7 @@
       showBanner(`Refresh complete in ${secs}s: ${summary.inserted} new article${summary.inserted === 1 ? "" : "s"} added, ${summary.skipped} already stored (${summary.total_returned} found).`, "info");
     } catch (err) {
       progressEl.classList.remove("show");
-      showBanner(`Refresh failed: ${err.message}. If the agent was already running it will still finish and save; reload in a minute.`, "error");
+      showBanner(`Refresh failed: ${err.message}. Any topics that had already finished were saved; reload to check.`, "error");
     } finally {
       clearInterval(timer);
       refreshBtn.disabled = false;
