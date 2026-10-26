@@ -83,13 +83,34 @@ function extractArticles(text: string): FoundArticle[] {
     }));
 }
 
-async function findArticles(client: Anthropic, topic: string): Promise<FoundArticle[]> {
+// Progress events streamed to the dashboard while the agent runs.
+type Stage = "starting" | "searching" | "checking" | "selecting" | "writing" | "saving" | "done" | "error";
+
+interface ProgressEvent {
+  type: "progress";
+  topic: string;
+  stage: Stage;
+  searches: number;
+  sources: number;
+  summaries: number;
+  query?: string;
+  inserted?: number;
+  skipped?: number;
+  error?: string;
+}
+
+type Progress = (event: ProgressEvent) => void;
+
+async function findArticles(client: Anthropic, topic: string, report: (p: Partial<ProgressEvent>) => void): Promise<FoundArticle[]> {
   const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: buildPrompt(topic) }];
+  const sources = new Set<string>();
+  // Claude's source-checking code sometimes re-runs a query, so count distinct queries.
+  const queries = new Set<string>();
   let text = "";
 
   // Web search is a server tool; the API may pause a long turn, so resume until it ends.
   for (let i = 0; i < 5; i++) {
-    const response = await client.beta.messages.create({
+    const stream = client.beta.messages.stream({
       model: MODEL,
       max_tokens: 16000,
       betas: ["server-side-fallback-2026-07-01"],
@@ -99,12 +120,35 @@ async function findArticles(client: Anthropic, topic: string): Promise<FoundArti
       messages,
     });
 
-    if (response.stop_reason === "refusal") throw new Error("Claude declined the request");
-
-    // Web search splits the answer across several text blocks; join them all.
-    for (const block of response.content) {
-      if (block.type === "text") text += block.text;
+    // Report each step Claude actually takes: searches, source checks (code it runs over
+    // the results), thinking, and the article list as it is written.
+    for await (const event of stream) {
+      if (event.type === "content_block_start") {
+        const block = event.content_block;
+        if (block.type === "server_tool_use" && block.name === "web_search") {
+          const query = (block.input as { query?: string } | undefined)?.query;
+          if (query) queries.add(query.trim().toLowerCase());
+          report({ stage: "searching", searches: queries.size, query });
+        } else if (block.type === "web_search_tool_result" && Array.isArray(block.content)) {
+          for (const r of block.content) if (r.type === "web_search_result") sources.add(r.url);
+          report({ stage: "searching", sources: sources.size });
+        } else if (block.type === "server_tool_use" && block.name === "code_execution") {
+          report({ stage: "checking" });
+        } else if (block.type === "thinking") {
+          report({ stage: "selecting" });
+        } else if (block.type === "text") {
+          report({ stage: "writing" });
+        }
+      } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+        const before = (text.match(/"url"\s*:/g) ?? []).length;
+        text += event.delta.text;
+        const after = (text.match(/"url"\s*:/g) ?? []).length;
+        if (after > before) report({ stage: "writing", summaries: Math.min(after, ARTICLES_PER_TOPIC) });
+      }
     }
+
+    const response = await stream.finalMessage();
+    if (response.stop_reason === "refusal") throw new Error("Claude declined the request");
 
     if (response.stop_reason !== "pause_turn") break;
     messages.push({ role: "assistant", content: response.content });
@@ -141,16 +185,27 @@ async function storeArticles(env: Env, topic: string, articles: FoundArticle[]):
   return { topic, returned: articles.length, inserted, skipped, removed: trim.meta.changes };
 }
 
-async function runAgent(env: Env) {
+async function runAgent(env: Env, onProgress: Progress = () => {}) {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const startedAt = new Date().toISOString();
 
   const topics = await Promise.all(
     TOPICS.map(async (topic): Promise<TopicResult> => {
+      const state: ProgressEvent = { type: "progress", topic, stage: "starting", searches: 0, sources: 0, summaries: 0 };
+      const report = (p: Partial<ProgressEvent>) => {
+        Object.assign(state, p);
+        onProgress({ ...state });
+      };
+      report({});
       try {
-        return await storeArticles(env, topic, await findArticles(client, topic));
+        const articles = await findArticles(client, topic, report);
+        report({ stage: "saving", summaries: articles.length });
+        const result = await storeArticles(env, topic, articles);
+        report({ stage: "done", inserted: result.inserted, skipped: result.skipped });
+        return result;
       } catch (err) {
         console.error(`Agent failed for "${topic}":`, err);
+        report({ stage: "error", error: String(err) });
         return { topic, returned: 0, inserted: 0, skipped: 0, removed: 0, error: String(err) };
       }
     }),
@@ -210,10 +265,39 @@ async function listArticles(env: Env, params: URLSearchParams) {
   return { count: results.length, articles: results };
 }
 
+// Streams progress as newline-delimited JSON, ending with {"type":"done","summary":...}.
+// The run lives in waitUntil so it still finishes and saves if the browser disconnects.
+function streamAgent(env: Env, ctx: ExecutionContext): Response {
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+  let open = true;
+  const send = (obj: unknown) => {
+    if (!open) return;
+    writer.write(encoder.encode(JSON.stringify(obj) + "\n")).catch(() => (open = false));
+  };
+
+  ctx.waitUntil(
+    (async () => {
+      try {
+        send({ type: "done", summary: await runAgent(env, send) });
+      } catch (err) {
+        send({ type: "error", error: String(err) });
+      } finally {
+        if (open) await writer.close().catch(() => {});
+      }
+    })(),
+  );
+
+  return new Response(readable, {
+    headers: { ...CORS_HEADERS, "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
+  });
+}
+
 // ---------- entry points ----------
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
 
     const url = new URL(request.url);
@@ -222,6 +306,7 @@ export default {
         case "/health":
           return json({ status: "ok", service: "news-app-backend", timestamp: new Date().toISOString() });
         case "/agent":
+          if (url.searchParams.get("stream") === "1") return streamAgent(env, ctx);
           return json(await runAgent(env));
         case "/articles":
           return json(await listArticles(env, url.searchParams));

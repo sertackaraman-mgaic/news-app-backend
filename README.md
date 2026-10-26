@@ -5,7 +5,7 @@ Cloudflare Worker + D1 backend for a News Intelligence App covering AI & capital
 ## Endpoints
 
 - `GET /health` — service status and current timestamp
-- `GET /agent` — runs the pipeline: Claude with web search finds the 5 most significant articles from the past 7 days per topic, stores new ones (deduped by URL), and keeps each topic capped at 20 articles. Also runs daily at 7 AM US Eastern.
+- `GET /agent` — runs the pipeline: Claude with web search finds the 5 most significant articles from the past 7 days per topic, stores new ones (deduped by URL), and keeps each topic capped at 20 articles. Add `?stream=1` to get live progress as newline-delimited JSON (used by the dashboard). Also runs daily at 7 AM US Eastern.
 - `GET /articles` — query stored articles. Optional params: `topic`, `from`, `to` (YYYY-MM-DD), `source`, `min_score`, `limit` (default 50, max 200)
 
 All responses include CORS headers.

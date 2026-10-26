@@ -48,6 +48,21 @@
   .banner.show { display: block; }
   .banner.info { background: var(--surface); border: 1px solid var(--border); }
   .banner.error { background: var(--error-bg); color: var(--error-fg); }
+  .progress { margin: 20px 0 0; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; display: none; }
+  .progress.show { display: block; }
+  .progress-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-weight: 600; margin-bottom: 10px; }
+  .progress-head span { color: var(--muted); font-weight: 500; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .bar { height: 6px; background: var(--low-bg); border-radius: 999px; overflow: hidden; margin-bottom: 14px; }
+  .bar div { height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width .4s ease; }
+  .rows { display: grid; gap: 10px; }
+  .row { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; }
+  .row .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+  .row.done .dot { background: var(--high-fg); animation: none; }
+  .row.error .dot { background: var(--error-fg); animation: none; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .row .name { font-weight: 600; font-size: 14px; }
+  .row .stage { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .stats { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
   main { padding: 8px 0 48px; }
   section h2 { font-size: 17px; margin: 28px 0 12px; display: flex; align-items: baseline; gap: 10px; }
   section h2 span { font-size: 13px; color: var(--muted); font-weight: 500; }
@@ -99,6 +114,11 @@
   </div>
 </header>
 <div class="wrap">
+  <div id="progress" class="progress" aria-live="polite">
+    <div class="progress-head">Agent is gathering news <span id="progressMeta"></span></div>
+    <div class="bar"><div id="progressBar"></div></div>
+    <div class="rows" id="progressRows"></div>
+  </div>
   <div id="banner" class="banner"></div>
   <main id="content"></main>
 </div>
@@ -186,20 +206,97 @@
     }
   }
 
+  // ---------- live agent progress ----------
+  const PER_TOPIC = 5, MAX_SEARCHES = 8;
+  const progressEl = $("progress"), progressRows = $("progressRows"), progressBar = $("progressBar"), progressMeta = $("progressMeta");
+  let topicState = new Map();
+
+  function stageText(p) {
+    switch (p.stage) {
+      case "starting": return "Starting…";
+      case "searching": return p.query ? `Searching the web: “${p.query}”` : "Searching the web…";
+      case "checking": return "Checking sources for dates and relevance";
+      case "selecting": return "Choosing the most significant articles";
+      case "writing": return `Writing summaries ${p.summaries}/${PER_TOPIC}`;
+      case "saving": return "Saving to the database";
+      case "done": return `Done: ${p.inserted} new, ${p.skipped} already stored`;
+      case "error": return "Failed: " + (p.error || "unknown error");
+    }
+    return p.stage;
+  }
+  // Rough share of a topic's work each stage represents, for the overall bar only.
+  function topicPercent(p) {
+    switch (p.stage) {
+      case "starting": return 2;
+      case "searching": case "checking": return 5 + 50 * Math.min(p.searches, MAX_SEARCHES) / MAX_SEARCHES;
+      case "selecting": return 60 + 5 * Math.min(p.searches, MAX_SEARCHES) / MAX_SEARCHES;
+      case "writing": return 70 + 25 * p.summaries / PER_TOPIC;
+      case "saving": return 97;
+      default: return 100;
+    }
+  }
+  function renderProgress() {
+    let html = "", total = 0;
+    for (const t of TOPICS) {
+      const p = topicState.get(t) || { stage: "starting", searches: 0, sources: 0, summaries: 0 };
+      p.pct = Math.max(p.pct || 0, topicPercent(p)); // never move backwards
+      total += p.pct;
+      const cls = p.stage === "done" ? "done" : p.stage === "error" ? "error" : "";
+      html += `<div class="row ${cls}"><div class="dot"></div><div>
+        <div class="name">${esc(t)}</div>
+        <div class="stage">${esc(stageText(p))}</div>
+        <div class="stats">${p.searches} search${p.searches === 1 ? "" : "es"} · ${p.sources} sources found · ${p.summaries}/${PER_TOPIC} summaries</div>
+      </div></div>`;
+    }
+    progressRows.innerHTML = html;
+    progressBar.style.width = (total / TOPICS.length).toFixed(1) + "%";
+  }
+
   async function refresh() {
     refreshBtn.disabled = true;
     refreshBtn.classList.add("loading");
     refreshBtn.querySelector(".label").textContent = "Running agent…";
-    showBanner("Searching the web for new articles. This usually takes about a minute.", "info");
+    hideBanner();
+    topicState = new Map();
+    renderProgress();
+    progressEl.classList.add("show");
+    const started = Date.now();
+    const timer = setInterval(() => (progressMeta.textContent = `${Math.round((Date.now() - started) / 1000)}s`), 1000);
+    progressMeta.textContent = "0s";
+
     try {
-      const res = await fetch(`${API}/agent`, { method: "POST" });
-      if (!res.ok) throw new Error(`Agent returned ${res.status}`);
-      const r = await res.json();
+      const res = await fetch(`${API}/agent?stream=1`, { method: "POST" });
+      if (!res.ok || !res.body) throw new Error(`Agent returned ${res.status}`);
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buf = "", summary = null;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += value;
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          const ev = JSON.parse(line);
+          if (ev.type === "progress") {
+            const prev = topicState.get(ev.topic);
+            topicState.set(ev.topic, { ...ev, pct: prev?.pct });
+            renderProgress();
+          } else if (ev.type === "done") summary = ev.summary;
+          else if (ev.type === "error") throw new Error(ev.error);
+        }
+      }
+      if (!summary) throw new Error("the connection closed before the agent finished");
       await loadArticles();
-      showBanner(`Refresh complete: ${r.inserted} new article${r.inserted === 1 ? "" : "s"} added, ${r.skipped} already stored (${r.total_returned} found).`, "info");
+      progressEl.classList.remove("show");
+      const secs = Math.round((Date.now() - started) / 1000);
+      showBanner(`Refresh complete in ${secs}s: ${summary.inserted} new article${summary.inserted === 1 ? "" : "s"} added, ${summary.skipped} already stored (${summary.total_returned} found).`, "info");
     } catch (err) {
-      showBanner(`Refresh failed: ${err.message}`, "error");
+      progressEl.classList.remove("show");
+      showBanner(`Refresh failed: ${err.message}. If the agent was already running it will still finish and save; reload in a minute.`, "error");
     } finally {
+      clearInterval(timer);
       refreshBtn.disabled = false;
       refreshBtn.classList.remove("loading");
       refreshBtn.querySelector(".label").textContent = "Refresh";
