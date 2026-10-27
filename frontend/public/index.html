@@ -323,7 +323,8 @@
     progressMeta.textContent = "0s";
 
     try {
-      const res = await fetch(`${API}/agent?stream=1`, { method: "POST" });
+      // Same-origin proxy: the frontend Worker adds the pipeline password server-side.
+      const res = await fetch("/api/refresh", { method: "POST" });
       if (!res.ok || !res.body) throw new Error(`Agent returned ${res.status}`);
       const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
       let buf = "", summary = null;
