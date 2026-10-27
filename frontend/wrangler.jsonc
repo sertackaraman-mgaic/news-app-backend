@@ -1,7 +1,10 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "news-app-frontend",
+  "main": "src/worker.js",
   "compatibility_date": "2026-10-01",
   "account_id": "ef068c77b17af655ace4b64ee2c0549d",
-  "assets": { "directory": "./public" }
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
+  // Calls the backend directly over a service binding instead of the public internet.
+  "services": [{ "binding": "BACKEND", "service": "news-app-backend" }]
 }

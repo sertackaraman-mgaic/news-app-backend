@@ -5,7 +5,7 @@ Cloudflare Worker + D1 backend for a News Intelligence App covering AI & capital
 ## Endpoints
 
 - `GET /health` — service status and current timestamp
-- `GET /agent` — runs the pipeline: Claude with web search finds the 5 most significant articles from the past 7 days per topic, stores new ones (deduped by URL), and keeps each topic capped at 20 articles. Add `?stream=1` to get live progress as newline-delimited JSON (used by the dashboard). Also runs daily at 7 AM US Eastern.
+- `POST /agent` — requires `Authorization: Bearer <AGENT_PASSWORD>` (401 otherwise). Runs the pipeline: Claude with web search finds the 5 most significant articles from the past 7 days per topic, stores new ones (deduped by URL), and keeps each topic capped at 20 articles. Add `?stream=1` to get live progress as newline-delimited JSON (used by the dashboard). Also runs daily at 7 AM US Eastern.
 - `GET /articles` — query stored articles. Optional params: `topic`, `from`, `to` (YYYY-MM-DD), `source`, `min_score`, `limit` (default 50, max 200)
 
 All responses include CORS headers.
@@ -20,6 +20,16 @@ npx wrangler deploy
 ```
 
 The dashboard lives in `frontend/` (static page served by the `news-app-frontend` Worker). Deploy it with `cd frontend && npx wrangler deploy`.
+
+The dashboard's Refresh button calls `POST /api/refresh` on the frontend Worker, which forwards to the backend's `/agent` over a service binding and adds the password server-side, so it never appears in the page's JavaScript. Both Workers hold the same `AGENT_PASSWORD` secret (a local copy lives in the gitignored `.env`):
+
+```bash
+PW=$(openssl rand -base64 33 | tr '+/' '-_' | tr -d '=\n')
+printf '%s' "$PW" | npx wrangler secret put AGENT_PASSWORD
+(cd frontend && printf '%s' "$PW" | npx wrangler secret put AGENT_PASSWORD)
+```
+
+Anyone who can open the dashboard can still press Refresh; put the frontend behind Cloudflare Access or add a rate limit if that matters.
 
 Secrets live in `.env` locally (gitignored) and as Worker secrets in Cloudflare; none are committed.
 

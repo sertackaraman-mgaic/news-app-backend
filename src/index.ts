@@ -3,6 +3,8 @@ import Anthropic from "@anthropic-ai/sdk";
 export interface Env {
   DB: D1Database;
   ANTHROPIC_API_KEY: string;
+  // Password the dashboard (via its frontend Worker) sends to /agent as a Bearer token.
+  AGENT_PASSWORD?: string;
   // Bearer token external systems send to POST /trigger.
   AGENT_TRIGGER_TOKEN?: string;
   // Signing secret from a Slack app, enables POST /slack for a slash command.
@@ -22,7 +24,7 @@ const TOPICS = [
   "AI in high-speed trading",
 ];
 
-const MODEL = "claude-opus-5-5";
+const MODEL = "claude-sonnet-5-5";
 const ARTICLES_PER_TOPIC = 5;
 const MAX_ARTICLES_PER_TOPIC = 20;
 const SCHEDULE_TIMEZONE = "America/New_York";
@@ -319,6 +321,15 @@ async function safeEqual(a: string, b: string): Promise<boolean> {
   return crypto.subtle.timingSafeEqual(da, db);
 }
 
+// Returns a 401/503 response unless the request carries "Authorization: Bearer <secret>".
+async function requireBearer(request: Request, secret: string | undefined): Promise<Response | null> {
+  if (!secret) return json({ error: "Endpoint is not configured" }, 503);
+  const auth = request.headers.get("Authorization") ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (!token || !(await safeEqual(token, secret))) return json({ error: "Unauthorized" }, 401);
+  return null;
+}
+
 function summaryText(s: Awaited<ReturnType<typeof runAgent>>): string {
   const lines = s.topics.map((t) =>
     t.error ? `• ${t.topic}: failed (${t.error})` : `• ${t.topic}: ${t.inserted} new, ${t.skipped} already stored`,
@@ -330,13 +341,8 @@ function summaryText(s: Awaited<ReturnType<typeof runAgent>>): string {
 // Returns 202 right away and runs in the background; add ?wait=1 to get the summary back instead.
 async function handleTrigger(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (request.method !== "POST") return json({ error: "Use POST" }, 405);
-  if (!env.AGENT_TRIGGER_TOKEN) return json({ error: "Trigger is not configured" }, 503);
-
-  const auth = request.headers.get("Authorization") ?? "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-  if (!token || !(await safeEqual(token, env.AGENT_TRIGGER_TOKEN))) {
-    return json({ error: "Unauthorized" }, 401);
-  }
+  const denied = await requireBearer(request, env.AGENT_TRIGGER_TOKEN);
+  if (denied) return denied;
 
   if (new URL(request.url).searchParams.get("wait") === "1") {
     const summary = await runAgent(env);
@@ -379,9 +385,12 @@ export default {
       switch (url.pathname) {
         case "/health":
           return json({ status: "ok", service: "news-app-backend", timestamp: new Date().toISOString() });
-        case "/agent":
+        case "/agent": {
+          const denied = await requireBearer(request, env.AGENT_PASSWORD);
+          if (denied) return denied;
           if (url.searchParams.get("stream") === "1") return streamAgent(env, ctx);
           return json(await runAgent(env));
+        }
         case "/trigger":
           return await handleTrigger(request, env, ctx);
         case "/slack":
