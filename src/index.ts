@@ -24,7 +24,7 @@ const TOPICS = [
   "AI in high-speed trading",
 ];
 
-const MODEL = "claude-opus-5-5";
+const MODEL = "claude-sonnet-5-5";
 const ARTICLES_PER_TOPIC = 5;
 const MAX_ARTICLES_PER_TOPIC = 20;
 const SCHEDULE_TIMEZONE = "America/New_York";
